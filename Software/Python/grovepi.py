@@ -57,13 +57,50 @@ if sys.platform == 'uwp':
 	import winrt_smbus as smbus
 	bus = smbus.SMBus(1)
 else:
-	import smbus
+	# The Arduino MCU on the GrovePi+ is unable to support I2C transfers with
+	# Repeated-Start commands.  Some I2C controllers may legitimitely use
+	# Repeated-Start when executing multi-part transfers involving a direction
+	# change such as the write-then-read transfers created by the
+	# smbus.write_i2c_block_data method.
+	#
+	# To ensure this doesn't happen, we use direct access to the I2C device node
+	# instead which allows us to issue the write-then-read sequences as separate
+	# transfers. This ensures that they are separated by Stop-Start commands
+	# instead of Repeated Starts
+	# ioctl command from linux/i2c-dev.h
+	#
+	# TODO - check if winrt_smbus behaves the same as linux smbus w.r.t.
+	# Repeated-Start commands
+
+	import io
+	import fcntl
+
+	I2C_SLAVE=0x0703
+	class i2c:
+		def __init__(self, bus):
+			self.fr = io.open("/dev/i2c-"+str(bus), "rb", buffering=0)
+			self.fw = io.open("/dev/i2c-"+str(bus), "wb", buffering=0)
+
+		def address(self, device):
+			fcntl.ioctl(self.fr, I2C_SLAVE, device)
+			fcntl.ioctl(self.fw, I2C_SLAVE, device)
+
+		def write(self, bytes):
+			self.fw.write(bytearray(bytes))
+
+		def read(self, bytes):
+			return bytearray(self.fr.read(bytes))
+
+		def close(self):
+			self.fw.close()
+			self.fr.close()
+
 	import RPi.GPIO as GPIO
 	rev = GPIO.RPI_REVISION
 	if rev == 2 or rev == 3:
-		bus = smbus.SMBus(1)
+		bus = i2c(1)
 	else:
-		bus = smbus.SMBus(0)
+		bus = i2c(0)
 
 # I2C Address of Arduino
 address = 0x04
@@ -166,7 +203,11 @@ unused = 0
 # Write I2C block
 def write_i2c_block(address, block):
 	try:
-		return bus.write_i2c_block_data(address, 1, block)
+		if sys.platform == 'uwp':
+			return bus.write_i2c_block_data(address, 1, block)
+		else:
+			bus.address(address)
+			return bus.write(block)
 	except IOError:
 		if debug:
 			print ("IOError")
@@ -175,7 +216,11 @@ def write_i2c_block(address, block):
 # Read I2C byte
 def read_i2c_byte(address):
 	try:
-		return bus.read_byte(address)
+		if sys.platform == 'uwp':
+			return bus.read_byte(address)
+		else:
+			bus.address(address)
+			return bus.read(1)[0]
 	except IOError:
 		if debug:
 			print ("IOError")
@@ -183,9 +228,14 @@ def read_i2c_byte(address):
 
 
 # Read I2C block
-def read_i2c_block(address):
+def read_i2c_block(address, len=32):
 	try:
-		return bus.read_i2c_block_data(address, 1)
+		if sys.platform == 'uwp':
+			return bus.read_i2c_block_data(address, 1)
+		else:
+			bus.address(address)
+			bus.write([1])
+			return bus.read(len)
 	except IOError:
 		if debug:
 			print ("IOError")
@@ -215,10 +265,10 @@ def pinMode(pin, mode):
 
 # Read analog value from Pin
 def analogRead(pin):
-	bus.write_i2c_block_data(address, 1, aRead_cmd + [pin, unused, unused])
+	write_i2c_block(address, aRead_cmd + [pin, unused, unused])
 	time.sleep(.1)
-	bus.read_byte(address)
-	number = bus.read_i2c_block_data(address, 1)
+	read_i2c_byte(address)
+	number = read_i2c_block(address)
 	time.sleep(.1)
 	return number[1] * 256 + number[2]
 
@@ -498,7 +548,7 @@ def ir_read_signal():
 	try:
 		write_i2c_block(address,ir_read_cmd+[unused,unused,unused])
 		time.sleep(.1)
-		data_back= bus.read_i2c_block_data(address, 1)[0:21]
+		data_back= read_i2c_block(address)[0:21]
 		if (data_back[1]!=255):
 			return data_back
 		return [-1]*21
@@ -523,7 +573,7 @@ def dustSensorRead():
 	#read_i2c_byte(address)
 	#number = read_i2c_block(address)
 	#return (number[1] * 256 + number[2])
-	data_back= bus.read_i2c_block_data(address, 1)[0:4]
+	data_back= read_i2c_block(address)[0:4]
 	#print data_back[:4]
 	if data_back[0]!=255:
 		lowpulseoccupancy=(data_back[3]*256*256+data_back[2]*256+data_back[1])
@@ -544,7 +594,7 @@ def encoder_dis():
 def encoderRead():
 	write_i2c_block(address, encoder_read_cmd + [unused, unused, unused])
 	time.sleep(.2)
-	data_back= bus.read_i2c_block_data(address, 1)[0:2]
+	data_back= read_i2c_block(address)[0:2]
 	#print data_back
 	if data_back[0]!=255:
 		return [data_back[0],data_back[1]]
@@ -562,7 +612,7 @@ def flowEnable():
 def flowRead():
 	write_i2c_block(address, flow_read_cmd + [unused, unused, unused])
 	time.sleep(.2)
-	data_back= bus.read_i2c_block_data(address, 1)[0:3]
+	data_back= read_i2c_block(address)[0:3]
 	#print data_back
 	if data_back[0]!=255:
 		return [data_back[0],data_back[2]*256+data_back[1]]
